@@ -1,0 +1,30 @@
+{
+    "apiVersion": 2,
+    "apiVersionMinor": 0,
+    "allowedPaymentMethods": [
+      {
+        "type": "CARD",
+        "parameters": {
+          "allowedAuthMethods": ["PAN_ONLY", "CRYPTOGRAM_3DS"],
+          "allowedCardNetworks": ["MASTERCARD", "VISA"]
+        },
+        "tokenizationSpecification": {
+          "type": "PAYMENT_GATEWAY",
+          "parameters": {
+            "gateway": "example",
+            "gatewayMerchantId": "exampleGatewayMerchantId"
+          }
+        }
+      }
+    ],
+    "merchantInfo": {
+      "merchantName": "Your Merchant Name",
+      "merchantId": "your-merchant-id"
+    },
+    "transactionInfo": {
+      "totalPriceStatus": "FINAL",
+      "totalPrice": "10.00",
+      "currencyCode": "USD"
+    }
+  }
+  
