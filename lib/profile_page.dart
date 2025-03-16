@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'booking_page.dart'; // Import the booking page
-import 'background_image_wrapper.dart';
-import 'parking_status.dart'; // Import the parking status page
-import 'package:cloud_firestore/cloud_firestore.dart'; // Import Firestore
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'booking_page.dart'; // Your BookingPage widget
+import 'parking_status.dart'; // Your ParkingStatus widget
+import 'background_image_wrapper.dart'; // Your BackgroundImageWrapper widget
+import 'header_footer.dart'; // Your HeaderFooter widget
 
 class ProfilePage extends StatefulWidget {
   final String username; // Field to hold the username
 
-  // Constructor to accept the username
-  ProfilePage({required this.username});
+  const ProfilePage({Key? key, required this.username}) : super(key: key);
 
   @override
   _ProfilePageState createState() => _ProfilePageState();
@@ -24,7 +24,7 @@ class _ProfilePageState extends State<ProfilePage> {
     _fetchUserName(); // Fetch the name corresponding to the username
   }
 
-  // Fetch the user's name from Firestore
+  // Fetch the user's full name from Firestore
   Future<void> _fetchUserName() async {
     try {
       QuerySnapshot querySnapshot = await FirebaseFirestore.instance
@@ -56,51 +56,48 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: BackgroundImageWrapper(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              // Display a loading indicator or the user's name
-              if (isLoading)
-                CircularProgressIndicator()
-              else
-                Text(
-                  'Welcome, ${userName ?? 'Guest'}!',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black,
+      // Use HeaderFooter to wrap the content with a header and footer.
+      body: HeaderFooter(
+        // Show a temporary title if loading; otherwise, show welcome message.
+        title: isLoading ? "Loading..." : 'Welcome, ${userName ?? 'Guest'}!',
+        // Wrap the profile content with BackgroundImageWrapper if needed.
+        child: BackgroundImageWrapper(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              // Center content vertically.
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Show a loading indicator if needed.
+                if (isLoading)
+                  CircularProgressIndicator()
+                else ...[
+                  SizedBox(height: 40),
+                  // Parking Slot Status Button
+                  ElevatedButton(
+                    child: Text("View Parking Slot Status"),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) => ParkingStatus()),
+                      );
+                    },
                   ),
-                ),
-              SizedBox(height: 40),
-
-              // Parking Slot Status Button
-              ElevatedButton(
-                child: Text("View Parking Slot Status"),
-                onPressed: () {
-                  // Navigate to the Parking Status Page
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => ParkingStatus()),
-                  );
-                },
-              ),
-              SizedBox(height: 20),
-
-              // Booking Page Button
-              ElevatedButton(
-                child: Text("Book a Slot"),
-                onPressed: () {
-                  // Navigate to the Booking Page
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => BookingPage()),
-                  );
-                },
-              ),
-            ],
+                  SizedBox(height: 20),
+                  // Booking Page Button
+                  ElevatedButton(
+                    child: Text("Book a Slot"),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => BookingPage()),
+                      );
+                    },
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),

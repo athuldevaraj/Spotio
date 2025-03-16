@@ -25,7 +25,7 @@ class ParkingApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'IoT-Based Smart Parking System',
+      title: 'Athul',
       home: HomePage(),
     );
   }
