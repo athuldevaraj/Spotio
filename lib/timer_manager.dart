@@ -53,12 +53,9 @@ class TimerManager with ChangeNotifier {
 
     // Update countdown every second
     Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!_activeTimers.containsKey(slot)) {
-        timer.cancel();
-        return;
-      }
-      if (_remainingTimes[slot]! > 0) {
-        _remainingTimes[slot] = _remainingTimes[slot]! - 1;
+      final remaining = _remainingTimes[slot];
+      if (remaining != null && remaining > 0) {
+        _remainingTimes[slot] = remaining - 1;
         _notifier.notifyListeners();
       } else {
         timer.cancel();

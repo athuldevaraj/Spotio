@@ -15,7 +15,6 @@ void main() async {
   // Ensure Firebase is initialized
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  WidgetsFlutterBinding.ensureInitialized();
   await TimerManager().initialize(); // Initialize timer manager
   runApp(ParkingApp());
 }
