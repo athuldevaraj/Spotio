@@ -1,66 +1,301 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'background_image_wrapper.dart';
+import 'header_footer.dart';
+import 'timer_manager.dart';
 
 class BookingPage extends StatefulWidget {
+  final String? username;
+
+  const BookingPage({Key? key, this.username}) : super(key: key);
   @override
   _BookingPageState createState() => _BookingPageState();
 }
 
-class _BookingPageState extends State<BookingPage> {
+class _BookingPageState extends State<BookingPage>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   Map<String, dynamic> slotData = {};
+  Map<String, dynamic> parkingSlotData = {};
   bool isLoading = true;
   bool isProcessingPayment = false;
+  Timer? _timer;
+  String? errorMessage;
+
+  // Animation controllers
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _scaleAnimation;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initAnimations();
     listenToSlotData();
+    listenToParkingSlotData();
+    _checkStoredBookings();
   }
 
-  // Real-time listener for slot data
-  void listenToSlotData() {
-    _firestore
-        .collection('parking_slots')
-        .doc('status')
-        .snapshots()
-        .listen((snapshot) {
-      if (snapshot.exists) {
-        setState(() {
-          slotData = Map<String, dynamic>.from(snapshot.data() as Map);
-          isLoading = false;
-        });
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _animationController.dispose();
+    _timer?.cancel();
+    TimerManager().removeListener(_updateUI);
+    super.dispose();
+  }
 
-        checkAndResetExpiredSlots();
-      }
+// Only needed if not using ListenableBuilder
+  void _updateUI() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkExpiredBookings();
+    }
+  }
+
+  void _initAnimations() {
+    _animationController = AnimationController(
+      vsync: this,
+      duration: Duration(milliseconds: 500),
+    )..forward();
+
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: Curves.easeIn,
+      ),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.95, end: 1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: Curves.easeOutBack,
+      ),
+    );
+  }
+
+  void _initializeTimer() {
+    _timer = Timer.periodic(Duration(seconds: 10), (timer) {
+      _checkExpiredBookings();
     });
   }
 
-  // Check and reset slots whose booking time has expired
-  void checkAndResetExpiredSlots() {
-    slotData.forEach((slot, value) async {
-      if (value['status'] == 1 && value['start_time'] != null) {
-        Timestamp startTime = value['start_time'];
-        DateTime bookingTime = startTime.toDate();
-        DateTime now = DateTime.now();
+  Future<void> _checkStoredBookings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('active_bookings') ?? [];
 
-        if (now.difference(bookingTime).inSeconds >= 60) {
+    for (String slot in bookings) {
+      if (TimerManager().isSlotActive(slot)) {
+        // Timer is already running for this slot
+        continue;
+      }
+      final expiryTime = prefs.getInt('${slot}_expiry');
+      if (expiryTime != null) {
+        final remaining = expiryTime - DateTime.now().millisecondsSinceEpoch;
+        if (remaining > 0) {
+          TimerManager().startTimerForSlot(
+            slot,
+            Duration(milliseconds: remaining),
+            onComplete: () => _removeBooking(slot),
+          );
+        } else {
+          await _removeBooking(slot);
+        }
+      }
+    }
+  }
+
+  Future<void> _removeBooking(String slot) async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('active_bookings') ?? [];
+    bookings.remove(slot);
+    await prefs.setStringList('active_bookings', bookings);
+    await prefs.remove('${slot}_expiry');
+  }
+
+  Future<void> _checkExpiredBookings() async {
+    final now = DateTime.now();
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('active_bookings') ?? [];
+    List<String> updatedBookings = [];
+
+    for (String slot in bookings) {
+      final expiryTime = prefs.getInt('${slot}_expiry');
+      if (expiryTime != null) {
+        if (now.isBefore(DateTime.fromMillisecondsSinceEpoch(expiryTime))) {
+          updatedBookings.add(slot);
+        } else {
           await resetSlot(slot);
         }
       }
-    });
+    }
+
+    await prefs.setStringList('active_bookings', updatedBookings);
   }
 
-  // Book a parking slot using UPI
+  Future<void> _checkSlotExpiration(String slot) async {
+    final prefs = await SharedPreferences.getInstance();
+    final expiryTime = prefs.getInt('${slot}_expiry');
+
+    if (expiryTime != null) {
+      if (DateTime.now().millisecondsSinceEpoch >= expiryTime) {
+        await resetSlot(slot);
+        await prefs.remove('${slot}_expiry');
+        final bookings = prefs.getStringList('active_bookings') ?? [];
+        bookings.remove(slot);
+        await prefs.setStringList('active_bookings', bookings);
+      }
+    }
+  }
+
+  Future<void> _storeBooking(String slot, int expiryTime) async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('active_bookings') ?? [];
+    if (!bookings.contains(slot)) {
+      bookings.add(slot);
+      await prefs.setStringList('active_bookings', bookings);
+      await prefs.setInt('${slot}_expiry', expiryTime);
+    }
+  }
+
+  void listenToSlotData() {
+    _firestore.collection('advance_parking').snapshots().listen(
+      (snapshot) {
+        if (snapshot.docs.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              slotData = {for (var doc in snapshot.docs) doc.id: doc.data()};
+              if (parkingSlotData.isNotEmpty) {
+                isLoading = false;
+                errorMessage = null;
+              }
+            });
+          }
+        } else {
+          if (mounted) {
+            setState(() {
+              slotData = {};
+              if (parkingSlotData.isNotEmpty || parkingSlotData.isEmpty) {
+                isLoading = false;
+              }
+            });
+          }
+        }
+      },
+      onError: (error) {
+        if (mounted) {
+          setState(() {
+            errorMessage = "Error loading parking data: $error";
+            isLoading = false;
+          });
+        }
+      },
+    );
+  }
+
+  void listenToParkingSlotData() {
+    _firestore.collection('parkingSlots').snapshots().listen(
+      (snapshot) {
+        if (snapshot.docs.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              parkingSlotData = {
+                for (var doc in snapshot.docs) doc.id: doc.data()
+              };
+              if (slotData.isNotEmpty) {
+                isLoading = false;
+                errorMessage = null;
+              }
+            });
+          }
+        } else {
+          if (mounted) {
+            setState(() {
+              parkingSlotData = {};
+              if (slotData.isNotEmpty || slotData.isEmpty) {
+                isLoading = false;
+              }
+            });
+          }
+        }
+      },
+      onError: (error) {
+        if (mounted) {
+          setState(() {
+            errorMessage = "Error loading parking data: $error";
+            isLoading = false;
+          });
+        }
+      },
+    );
+  }
+
+  bool isSlotAvailable(String slot) {
+    bool advanceAvailable =
+        !slotData.containsKey(slot) || slotData[slot]['status'] == 0;
+    bool parkingAvailable = !parkingSlotData.containsKey(slot) ||
+        parkingSlotData[slot]['status'] == 0 ||
+        parkingSlotData[slot]['status'] == '0';
+    return advanceAvailable && parkingAvailable;
+  }
+
+  int getSlotStatus(String slot) {
+    if (slotData.containsKey(slot) && slotData[slot]['status'] == 2) {
+      return 2;
+    }
+    if ((slotData.containsKey(slot) && slotData[slot]['status'] == 1) ||
+        (parkingSlotData.containsKey(slot) &&
+                parkingSlotData[slot]['status'] == 1 ||
+            parkingSlotData[slot]['status'] == '1')) {
+      return 1;
+    }
+    return 0;
+  }
+
   Future<void> bookSlot(String slot) async {
-    if (slotData[slot]['status'] == 0) {
-      showPaymentOptions(slot);
-    } else {
-      // Use ScaffoldMessenger instead of Fluttertoast
+    if (widget.username == null || widget.username!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$slot is already occupied.')),
+        SnackBar(content: Text('PLEASE LOG IN TO BOOK A PARKING SLOT')),
+      );
+      return;
+    }
+
+    final FirebaseFirestore firestore = FirebaseFirestore.instance;
+    DocumentReference advanceSlotRef =
+        firestore.collection('advance_parking').doc(slot);
+    DocumentReference parkingSlotRef =
+        firestore.collection('parkingSlots').doc(slot);
+
+    try {
+      DocumentSnapshot advanceSnapshot = await advanceSlotRef.get();
+      DocumentSnapshot parkingSnapshot = await parkingSlotRef.get();
+
+      bool advanceOccupied = advanceSnapshot.exists &&
+          (advanceSnapshot.data() as Map<String, dynamic>)['status'] == 1;
+      bool parkingOccupied = parkingSnapshot.exists &&
+          ((parkingSnapshot.data() as Map<String, dynamic>)['status'] == 1 ||
+              (parkingSnapshot.data() as Map<String, dynamic>)['status'] ==
+                  '1');
+
+      if (advanceOccupied || parkingOccupied) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$slot IS ALREADY OCCUPIED')),
+        );
+      } else {
+        showPaymentOptions(slot);
+      }
+    } catch (e) {
+      print("Error checking slot: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ERROR CHECKING SLOT AVAILABILITY')),
       );
     }
   }
@@ -77,40 +312,30 @@ class _BookingPageState extends State<BookingPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Book Parking Slot $slot',
+              'BOOK PARKING SLOT ${slot.toUpperCase()}',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             SizedBox(height: 10),
-            Text('Fee: ₹10.00', style: TextStyle(fontSize: 16)),
+            Text('FEE: ₹10.00', style: TextStyle(fontSize: 16)),
             SizedBox(height: 20),
-            // Fix overflow issue by using SingleChildScrollView for horizontal scroll capability
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  _buildPaymentOption(
-                    'Google Pay',
-                    Icons.payment,
-                    () => initiateUpiPayment(slot, 'gpay'),
-                  ),
+                  _buildPaymentOption('GOOGLE PAY', Icons.payment,
+                      () => initiateUpiPayment(slot, 'gpay')),
+                  SizedBox(width: 10),
+                  _buildPaymentOption('PHONEPE', Icons.account_balance_wallet,
+                      () => initiateUpiPayment(slot, 'phonepe')),
+                  SizedBox(width: 10),
+                  _buildPaymentOption('PAYTM', Icons.attach_money,
+                      () => initiateUpiPayment(slot, 'paytm')),
                   SizedBox(width: 10),
                   _buildPaymentOption(
-                    'PhonePe',
-                    Icons.account_balance_wallet,
-                    () => initiateUpiPayment(slot, 'phonepe'),
-                  ),
-                  SizedBox(width: 10),
-                  _buildPaymentOption(
-                    'Paytm',
-                    Icons.attach_money,
-                    () => initiateUpiPayment(slot, 'paytm'),
-                  ),
-                  SizedBox(width: 10),
-                  _buildPaymentOption(
-                    'Any UPI',
+                    'ANY UPI',
                     Icons.credit_card,
                     () => initiateUpiPayment(slot, ''),
-                  ),
+                  )
                 ],
               ),
             ),
@@ -141,73 +366,51 @@ class _BookingPageState extends State<BookingPage> {
     );
   }
 
-  // Initiate UPI payment with specific app
   Future<void> initiateUpiPayment(String slot, String app) async {
-    setState(() {
-      isProcessingPayment = true;
-    });
+    setState(() => isProcessingPayment = true);
 
-    // Generate a unique transaction reference ID
     String txnRef = 'TXN${DateTime.now().millisecondsSinceEpoch}';
-
-    // Create the UPI payment URL
     String upiUrl = generateUpiUrl(
-      upiId: 'athuldevaraj1@oksbi', // Your UPI ID
-      name: 'Parking Slot Booking',
+      upiId: 'athuldevaraj1@oksbi',
+      name: 'PARKING SLOT BOOKING',
       amount: 10.00,
       transactionRef: txnRef,
-      note: 'Booking for slot $slot',
+      note: 'BOOKING FOR SLOT $slot',
       app: app,
     );
 
-    // First create a temporary booking to prevent double booking
-    await _firestore.collection('parking_slots').doc('status').update({
-      '$slot.status': 2, // Status 2 can indicate "payment in progress"
-      '$slot.payment_ref': txnRef,
+    DocumentReference slotRef =
+        _firestore.collection('advance_parking').doc(slot);
+    await slotRef.update({
+      'status': 2,
+      'payment_ref': txnRef,
+      'username': widget.username,
     });
 
     try {
-      // Check if URI can be launched using the new Uri approach
       final Uri uri = Uri.parse(upiUrl);
       if (await canLaunchUrl(uri)) {
-        Navigator.pop(context); // Close bottom sheet
+        Navigator.pop(context);
         await launchUrl(uri, mode: LaunchMode.externalApplication);
-
-        // Show a dialog after returning from the payment app
         await Future.delayed(Duration(seconds: 2));
-        if (mounted) {
-          confirmPaymentStatus(slot, txnRef);
-        }
+        if (mounted) confirmPaymentStatus(slot, txnRef);
       } else {
-        // No UPI app found
         resetSlot(slot);
-        // Use ScaffoldMessenger instead of Fluttertoast
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('No UPI payment app found.'),
-            duration: Duration(seconds: 3),
-          ),
+          SnackBar(content: Text('NO UPI PAYMENT APP FOUND')),
         );
       }
     } catch (e) {
       print('UPI launch error: $e');
       resetSlot(slot);
-      // Use ScaffoldMessenger instead of Fluttertoast
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Payment failed. Please try again.'),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 3),
-        ),
+        SnackBar(content: Text('PAYMENT FAILED. PLEASE TRY AGAIN')),
       );
     } finally {
-      setState(() {
-        isProcessingPayment = false;
-      });
+      setState(() => isProcessingPayment = false);
     }
   }
 
-  // Generate UPI payment URL with app-specific parameters
   String generateUpiUrl({
     required String upiId,
     required String name,
@@ -225,7 +428,6 @@ class _BookingPageState extends State<BookingPage> {
         'tn=${Uri.encodeComponent(note)}&'
         'tr=$transactionRef';
 
-    // Add app-specific package names - ensures opening of specific apps
     if (app == 'gpay') {
       return '$baseUrl&package=com.google.android.apps.nbu.paisa.user';
     } else if (app == 'phonepe') {
@@ -233,7 +435,6 @@ class _BookingPageState extends State<BookingPage> {
     } else if (app == 'paytm') {
       return '$baseUrl&package=net.one97.paytm';
     }
-
     return baseUrl;
   }
 
@@ -242,255 +443,457 @@ class _BookingPageState extends State<BookingPage> {
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: Text('Payment Status'),
-        content: Text('Did you complete the payment successfully?'),
+        title: Text('PAYMENT STATUS'),
+        content: Text('DID YOU COMPLETE THE PAYMENT SUCCESSFULLY?'),
         actions: [
           TextButton(
             onPressed: () {
               Navigator.pop(context);
               resetSlot(slot);
-              // Use ScaffoldMessenger instead of Fluttertoast
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Booking cancelled.')),
+                SnackBar(content: Text('BOOKING CANCELLED')),
               );
             },
-            child: Text('No'),
+            child: Text('NO'),
           ),
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
               finalizeBooking(slot, txnRef);
             },
-            child: Text('Yes'),
+            child: Text('YES'),
           ),
         ],
       ),
     );
   }
 
-  // Finalize the booking after payment
   Future<void> finalizeBooking(String slot, String txnRef) async {
     try {
-      await _firestore.collection('parking_slots').doc('status').update({
-        '$slot.status': 1,
-        '$slot.start_time': FieldValue.serverTimestamp(),
-        '$slot.payment_ref': txnRef,
+      DocumentSnapshot parkingSnapshot =
+          await _firestore.collection('parkingSlots').doc(slot).get();
+      if (parkingSnapshot.exists &&
+          ((parkingSnapshot.data() as Map<String, dynamic>)['status'] == 1 ||
+              (parkingSnapshot.data() as Map<String, dynamic>)['status'] ==
+                  '1')) {
+        resetSlot(slot);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('SORRY, $slot IS NO LONGER AVAILABLE')),
+        );
+        return;
+      }
+
+      // Calculate expiration time (60 seconds from now)
+      final expiryTime = DateTime.now().add(Duration(seconds: 60));
+
+      DocumentReference advanceSlotRef =
+          _firestore.collection('advance_parking').doc(slot);
+      DocumentReference parkingSlotRef =
+          _firestore.collection('parkingSlots').doc(slot);
+
+      await advanceSlotRef.update({
+        'status': 1,
+        'start_time': FieldValue.serverTimestamp(),
+        'expiry_time': Timestamp.fromDate(expiryTime),
+        'payment_ref': txnRef,
+        'username': widget.username,
       });
 
-      // Also log the transaction
+      await parkingSlotRef.update({
+        'username': widget.username,
+      });
+
       await _firestore.collection('transactions').add({
         'slot': slot,
         'transaction_ref': txnRef,
         'amount': 10.0,
         'status': 'completed',
         'timestamp': FieldValue.serverTimestamp(),
+        'username': widget.username,
       });
 
-      // Use ScaffoldMessenger instead of Fluttertoast
+      // Store booking locally
+      await _storeBooking(slot, expiryTime.millisecondsSinceEpoch);
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$slot booked successfully!'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 3),
-        ),
+        SnackBar(content: Text('$slot BOOKED SUCCESSFULLY!')),
       );
+      TimerManager().startTimerForSlot(
+        slot,
+        const Duration(seconds: 60),
+        onComplete: () => print('Slot $slot released'),
+      );
+
+      // Store booking locally
+      final prefs = await SharedPreferences.getInstance();
+      final bookings = prefs.getStringList('active_bookings') ?? [];
+      if (!bookings.contains(slot)) {
+        bookings.add(slot);
+        await prefs.setStringList('active_bookings', bookings);
+        await prefs.setInt(
+          '${slot}_expiry',
+          DateTime.now()
+              .add(const Duration(seconds: 60))
+              .millisecondsSinceEpoch,
+        );
+      }
     } catch (e) {
       print('Error finalizing booking: $e');
       resetSlot(slot);
-      // Use ScaffoldMessenger instead of Fluttertoast
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error booking $slot. Please try again.'),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 3),
-        ),
+        SnackBar(content: Text('ERROR BOOKING $slot. PLEASE TRY AGAIN')),
       );
     }
   }
 
-  // Reset a slot
   Future<void> resetSlot(String slot) async {
     try {
-      await _firestore.collection('parking_slots').doc('status').update({
-        '$slot.status': 0,
-        '$slot.start_time': null,
-        '$slot.payment_ref': null,
+      DocumentReference advanceSlotRef =
+          _firestore.collection('advance_parking').doc(slot);
+      await advanceSlotRef.update({
+        'status': 0,
+        'start_time': null,
+        'payment_ref': null,
+        'username': null,
+        'expiry_time': null,
       });
-      print('$slot has been reset to free.');
+
+      DocumentReference parkingSlotRef =
+          _firestore.collection('parkingSlots').doc(slot);
+      DocumentSnapshot parkingSnapshot = await parkingSlotRef.get();
+
+      if (parkingSnapshot.exists) {
+        await parkingSlotRef.update({
+          'status': '0',
+          'username': null,
+        });
+      }
+
+      // Clear from local storage
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('${slot}_expiry');
+      final bookings = prefs.getStringList('active_bookings') ?? [];
+      bookings.remove(slot);
+      await prefs.setStringList('active_bookings', bookings);
+
+      print('$slot HAS BEEN RESET TO FREE');
     } catch (e) {
       print('Error resetting slot: $e');
     }
   }
 
+  int getTimeRemaining(String slot) {
+    // Check TimerManager first
+    final timerRemaining = TimerManager().getRemainingTime(slot);
+    if (timerRemaining != null) return timerRemaining;
+
+    // Fallback to Firestore data
+    if (slotData.containsKey(slot) &&
+        slotData[slot]['status'] == 1 &&
+        slotData[slot]['start_time'] != null) {
+      Timestamp startTime = slotData[slot]['start_time'];
+      DateTime bookingTime = startTime.toDate();
+      return 60 - DateTime.now().difference(bookingTime).inSeconds;
+    }
+    return 0;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Parking Slot Booking'),
-        backgroundColor: Colors.blue[800],
-        elevation: 0,
-      ),
-      body: BackgroundImageWrapper(
-        child: isLoading
-            ? Center(child: CircularProgressIndicator())
-            : Stack(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
-                            child: Column(
-                              children: [
-                                Text(
-                                  'Available Parking Slots',
-                                  style: TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                SizedBox(height: 10),
-                                Text(
-                                  'Tap on an available slot to book',
-                                  style: TextStyle(
-                                    color: Colors.grey[700],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        SizedBox(height: 20),
-                        Expanded(
-                          child: GridView.builder(
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 2,
-                              childAspectRatio: 1.5,
-                              crossAxisSpacing: 10,
-                              mainAxisSpacing: 10,
-                            ),
-                            itemCount: slotData.length,
-                            itemBuilder: (context, index) {
-                              String slot = slotData.keys.elementAt(index);
-                              bool isAvailable = slotData[slot]['status'] == 0;
-                              bool isPending = slotData[slot]['status'] == 2;
+    final screenSize = MediaQuery.of(context).size;
+    final isPortrait = screenSize.height > screenSize.width;
 
-                              return GestureDetector(
-                                onTap:
-                                    isAvailable ? () => bookSlot(slot) : null,
-                                child: Card(
-                                  color: isAvailable
-                                      ? Colors.green[100]
-                                      : isPending
-                                          ? Colors.amber[100]
-                                          : Colors.red[100],
+    Set<String> allSlots = {...slotData.keys, ...parkingSlotData.keys};
+    List<String> sortedSlots = allSlots.toList()
+      ..sort((a, b) {
+        RegExp regExp = RegExp(r'(\d+)');
+        int aNum = int.parse(regExp.firstMatch(a)?.group(1) ?? '0');
+        int bNum = int.parse(regExp.firstMatch(b)?.group(1) ?? '0');
+        return aNum.compareTo(bNum);
+      });
+
+    return Scaffold(
+      body: BackgroundImageWrapper(
+        child: HeaderFooter(
+          title: 'Parking Slot Booking',
+          child: isLoading
+              ? Center(child: CircularProgressIndicator())
+              : errorMessage != null
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.error_outline,
+                              size: 48, color: Colors.red),
+                          SizedBox(height: 16),
+                          Text(
+                            errorMessage!,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontSize: screenSize.width * 0.04,
+                            ),
+                          ),
+                          SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: () {
+                              setState(() {
+                                isLoading = true;
+                                errorMessage = null;
+                              });
+                              listenToSlotData();
+                              listenToParkingSlotData();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.grey[900],
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                            child: Text(
+                              'RETRY',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: screenSize.width * 0.035,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : AnimatedBuilder(
+                      animation: _animationController,
+                      builder: (context, child) {
+                        return Opacity(
+                          opacity: _fadeAnimation.value,
+                          child: Transform.scale(
+                            scale: _scaleAnimation.value,
+                            child: child,
+                          ),
+                        );
+                      },
+                      child: Stack(
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(screenSize.width * 0.04),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Card(
+                                  elevation: 6,
                                   shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    side: BorderSide(
-                                      color: isAvailable
-                                          ? Colors.green
-                                          : isPending
-                                              ? Colors.amber
-                                              : Colors.red,
-                                      width: 2,
+                                    borderRadius: BorderRadius.circular(15),
+                                  ),
+                                  margin: EdgeInsets.only(
+                                      bottom: screenSize.height * 0.02),
+                                  child: Padding(
+                                    padding:
+                                        EdgeInsets.all(screenSize.width * 0.04),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          'Available Parking Slots',
+                                          style: TextStyle(
+                                            fontSize: screenSize.width * 0.05,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.grey[800],
+                                          ),
+                                        ),
+                                        SizedBox(
+                                            height: screenSize.height * 0.01),
+                                        Text(
+                                          widget.username != null &&
+                                                  widget.username!.isNotEmpty
+                                              ? 'Tap on an available slot to book, ${widget.username}'
+                                              : 'PLEASE LOG IN TO BOOK A PARKING SLOT',
+                                          style: TextStyle(
+                                            fontSize: screenSize.width * 0.035,
+                                            color: Colors.grey[600],
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        slot,
-                                        style: TextStyle(
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.bold,
+                                ),
+                                sortedSlots.isEmpty
+                                    ? Expanded(
+                                        child: Center(
+                                          child: Text(
+                                            'NO PARKING SLOTS AVAILABLE',
+                                            style: TextStyle(
+                                              fontSize:
+                                                  screenSize.width * 0.045,
+                                              color: Colors.grey[700],
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    : Expanded(
+                                        child: GridView.builder(
+                                          gridDelegate:
+                                              SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: isPortrait ? 2 : 3,
+                                            childAspectRatio: 1.3,
+                                            crossAxisSpacing:
+                                                screenSize.width * 0.03,
+                                            mainAxisSpacing:
+                                                screenSize.width * 0.03,
+                                          ),
+                                          itemCount: sortedSlots.length,
+                                          itemBuilder: (context, index) {
+                                            String slot = sortedSlots[index];
+                                            int status = getSlotStatus(slot);
+                                            bool isAvailable = status == 0;
+                                            bool isPending = status == 2;
+                                            int remainingTime =
+                                                getTimeRemaining(slot);
+
+                                            return _buildSlotCard(
+                                              context,
+                                              slot: slot,
+                                              status: status,
+                                              isAvailable: isAvailable,
+                                              isPending: isPending,
+                                              remainingTime: remainingTime,
+                                              screenSize: screenSize,
+                                            );
+                                          },
                                         ),
                                       ),
-                                      SizedBox(height: 5),
-                                      Text(
-                                        isPending
-                                            ? 'Payment Pending'
-                                            : isAvailable
-                                                ? 'Available'
-                                                : 'Occupied - ${getTimeRemaining(slot)}s left',
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          color: isAvailable
-                                              ? Colors.green[800]
-                                              : isPending
-                                                  ? Colors.amber[800]
-                                                  : Colors.red[800],
-                                        ),
-                                      ),
-                                      if (!isAvailable && !isPending)
-                                        LinearProgressIndicator(
-                                          value: getTimeRemaining(slot) / 60,
-                                          backgroundColor: Colors.red[200],
-                                          valueColor:
-                                              AlwaysStoppedAnimation<Color>(
-                                                  Colors.red[800]!),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (isProcessingPayment)
-                    Container(
-                      color: Colors.black54,
-                      child: Center(
-                        child: Card(
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(20.0),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                CircularProgressIndicator(),
-                                SizedBox(height: 20),
-                                Text(
-                                  'Processing Payment',
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
                               ],
                             ),
                           ),
-                        ),
+                          if (isProcessingPayment)
+                            Container(
+                              color: Colors.black54,
+                              child: Center(
+                                child: Card(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(15),
+                                  ),
+                                  child: Padding(
+                                    padding:
+                                        EdgeInsets.all(screenSize.width * 0.06),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        CircularProgressIndicator(),
+                                        SizedBox(
+                                            height: screenSize.height * 0.02),
+                                        Text(
+                                          'PROCESSING PAYMENT',
+                                          style: TextStyle(
+                                            fontSize: screenSize.width * 0.045,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                ],
-              ),
+        ),
       ),
     );
   }
 
-  // Get the remaining time for a booked slot
-  int getTimeRemaining(String slot) {
-    if (slotData[slot]['status'] == 1 && slotData[slot]['start_time'] != null) {
-      Timestamp startTime = slotData[slot]['start_time'];
-      DateTime bookingTime = startTime.toDate();
-      DateTime now = DateTime.now();
+  Widget _buildSlotCard(
+    BuildContext context, {
+    required String slot,
+    required int status,
+    required bool isAvailable,
+    required bool isPending,
+    required int remainingTime,
+    required Size screenSize,
+  }) {
+    final backgroundColor = isAvailable
+        ? Colors.green.withOpacity(0.3)
+        : isPending
+            ? Colors.orange.withOpacity(0.3)
+            : Colors.red.withOpacity(0.3);
 
-      int remainingTime = 60 - now.difference(bookingTime).inSeconds;
-      return remainingTime > 0 ? remainingTime : 0;
-    }
-    return 0;
+    return ListenableBuilder(
+      listenable: TimerManager(),
+      builder: (context, _) {
+        // Get the current remaining time from TimerManager
+        final currentRemaining =
+            TimerManager().getRemainingTime(slot) ?? remainingTime;
+
+        return AnimatedContainer(
+          duration: Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          child: Card(
+            elevation: 4,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            color: backgroundColor,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: isAvailable &&
+                      widget.username != null &&
+                      widget.username!.isNotEmpty
+                  ? () {
+                      setState(() {
+                        _animationController.reset();
+                        _animationController.forward();
+                      });
+                      bookSlot(slot);
+                    }
+                  : null,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    slot.toUpperCase(),
+                    style: TextStyle(
+                      fontSize: screenSize.width * 0.05,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black,
+                    ),
+                  ),
+                  SizedBox(height: screenSize.height * 0.01),
+                  Text(
+                    isPending
+                        ? 'PAYMENT PENDING'
+                        : isAvailable
+                            ? 'AVAILABLE'
+                            : 'OCCUPIED' +
+                                (currentRemaining > 0
+                                    ? ' - $currentRemaining S LEFT'
+                                    : ''),
+                    style: TextStyle(
+                      fontSize: screenSize.width * 0.035,
+                      color: Colors.black,
+                    ),
+                  ),
+                  if (!isAvailable && !isPending && currentRemaining > 0)
+                    Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: screenSize.width * 0.05,
+                        vertical: screenSize.height * 0.01,
+                      ),
+                      child: LinearProgressIndicator(
+                        value: currentRemaining / 60,
+                        backgroundColor: backgroundColor.withOpacity(0.5),
+                        valueColor: AlwaysStoppedAnimation<Color>(isAvailable
+                            ? Colors.green
+                            : isPending
+                                ? Colors.orange
+                                : Colors.red),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 }

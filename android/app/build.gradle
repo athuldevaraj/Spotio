@@ -21,10 +21,11 @@ android {
 
     defaultConfig {
         minSdkVersion 23
-        targetSdkVersion 31
+        targetSdkVersion 33
         applicationId = "com.yourcompany.parkingapp"
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        resValue "string", "app_name", "SpotIO"
     }
 
     buildTypes {

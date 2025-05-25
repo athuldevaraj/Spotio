@@ -24,7 +24,7 @@
     </queries>
     
     <application
-        android:label="parking"
+        android:label="SpotIO"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon">
         <activity

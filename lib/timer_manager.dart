@@ -1,63 +1,113 @@
 import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart'; // Add this import for VoidCallback
 
-class TimerManager {
+class TimerManager with ChangeNotifier {
   static final TimerManager _instance = TimerManager._internal();
-  Timer? _timer;
-  int remainingTime = 0; // Time remaining in seconds
-  String activeSlot = ''; // The currently active slot
-  Function? onUpdate; // Callback for UI updates
-  bool isRunning = false; // Flag to check if the timer is running
-
+  factory TimerManager() => _instance;
   TimerManager._internal();
 
-  static TimerManager get instance => _instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final Map<String, Timer> _activeTimers = {};
+  final Map<String, int> _remainingTimes = {};
 
-  // Starts the timer for a given slot with the duration
-  void startTimer(String slot, int durationInSeconds, Function callback) {
-    if (_timer != null && _timer!.isActive) {
-      _timer!.cancel(); // Cancel any running timers before starting a new one
+  Future<void> initialize() async {
+    final prefs = await SharedPreferences.getInstance();
+    final activeSlots = prefs.getStringList('active_timers') ?? [];
+
+    for (final slot in activeSlots) {
+      final expiryTime = prefs.getInt('${slot}_expiry');
+      if (expiryTime != null) {
+        final remaining = expiryTime - DateTime.now().millisecondsSinceEpoch;
+        if (remaining > 0) {
+          startTimerForSlot(
+            slot,
+            Duration(milliseconds: remaining),
+            onComplete: () => resetSlot(slot),
+          );
+        } else {
+          await resetSlot(slot);
+        }
+      }
     }
+  }
 
-    activeSlot = slot;
-    remainingTime = durationInSeconds;
-    onUpdate = callback;
-    isRunning = true;
+  final _notifier = ChangeNotifier();
+  void addListener(VoidCallback listener) => _notifier.addListener(listener);
+  void removeListener(VoidCallback listener) =>
+      _notifier.removeListener(listener);
 
-    // Set a periodic timer to count down every second
-    _timer = Timer.periodic(Duration(seconds: 1), (timer) {
-      if (remainingTime > 0) {
-        remainingTime--;
-        onUpdate?.call(); // Notify the UI to update the time remaining
+  void startTimerForSlot(String slot, Duration duration,
+      {VoidCallback? onComplete}) {
+    _activeTimers[slot]?.cancel();
+
+    _storeExpiryTime(slot, duration);
+
+    _remainingTimes[slot] = duration.inSeconds;
+
+    _activeTimers[slot] = Timer(duration, () async {
+      await resetSlot(slot);
+      onComplete?.call();
+    });
+
+    // Update countdown every second
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!_activeTimers.containsKey(slot)) {
+        timer.cancel();
+        return;
+      }
+      if (_remainingTimes[slot]! > 0) {
+        _remainingTimes[slot] = _remainingTimes[slot]! - 1;
+        _notifier.notifyListeners();
       } else {
-        _timer!.cancel(); // Stop the timer once it reaches 0
-        resetSlotStatus(); // Reset the slot to 0 after the timer ends
+        timer.cancel();
       }
     });
   }
 
-  // Resets the timer and the active slot status
-  void resetSlotStatus() async {
-    if (activeSlot.isNotEmpty) {
-      // Update the slot status in Firestore after timer ends
-      await FirebaseFirestore.instance
-          .collection('parking_slots')
-          .doc('status')
-          .update({
-        activeSlot: 0, // Reset the slot to free (0)
-      });
+  Future<void> _storeExpiryTime(String slot, Duration duration) async {
+    final prefs = await SharedPreferences.getInstance();
+    final expiryTime = DateTime.now().add(duration).millisecondsSinceEpoch;
+    await prefs.setInt('${slot}_expiry', expiryTime);
 
-      activeSlot = ''; // Clear the active slot
-      remainingTime = 0;
-      isRunning = false;
-
-      onUpdate?.call(); // Notify the UI that the timer has ended
+    final activeSlots = prefs.getStringList('active_timers') ?? [];
+    if (!activeSlots.contains(slot)) {
+      activeSlots.add(slot);
+      await prefs.setStringList('active_timers', activeSlots);
     }
   }
 
-  // Checks if the timer is still running
-  bool isTimerRunning() => isRunning;
+  Future<void> resetSlot(String slot) async {
+    try {
+      await _firestore.collection('advance_parking').doc(slot).update({
+        'status': 0,
+        'start_time': null,
+        'payment_ref': null,
+        'username': null,
+        'expiry_time': null,
+      });
 
-  // Get the remaining time in seconds
-  int getRemainingTime() => remainingTime;
+      await _firestore.collection('parkingSlots').doc(slot).update({
+        'status': 0,
+        'username': null,
+      });
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('${slot}_expiry');
+      final activeSlots = prefs.getStringList('active_timers') ?? [];
+      activeSlots.remove(slot);
+      await prefs.setStringList('active_timers', activeSlots);
+
+      _activeTimers[slot]?.cancel();
+      _activeTimers.remove(slot);
+      _remainingTimes.remove(slot);
+    } catch (e) {
+      print('Error resetting slot $slot: $e');
+    }
+  }
+
+  int? getRemainingTime(String slot) => _remainingTimes[slot];
+
+  bool isSlotActive(String slot) => _activeTimers.containsKey(slot);
 }

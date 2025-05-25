@@ -1,111 +1,89 @@
-import 'dart:async'; // For Timer
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'background_image_wrapper.dart';
 import 'header_footer.dart';
+import 'background_image_wrapper.dart';
 
 class ParkingStatus extends StatefulWidget {
   @override
   _ParkingStatusState createState() => _ParkingStatusState();
 }
 
-class _ParkingStatusState extends State<ParkingStatus> {
+class _ParkingStatusState extends State<ParkingStatus>
+    with SingleTickerProviderStateMixin {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
-  // Numeric statuses from "parking_slots":
-  // collection("parking_slots").doc("status") has fields:
-  //   "slot1": { "status": 1, "start_time": null }, etc.
   Map<String, int> numericStatus = {};
-
-  // String statuses from "parkingSlots":
-  // collection("parkingSlots").doc("slot1" or "slot2") has a field "status": "0" or "1"
   Map<String, String> stringStatus = {};
-
   bool isLoading = true;
-
-  // The slot IDs we want to track
-  final List<String> slotKeys = ['slot1', 'slot2'];
-
-  // Timer for auto reload
+  final List<String> slotKeys = ['SLOT1', 'SLOT2']; // Capitalized
   Timer? _autoReloadTimer;
+
+  // Animation controllers
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _scaleAnimation;
 
   @override
   void initState() {
     super.initState();
-    print('ParkingStatus page loaded');
+    _initAnimations();
     fetchData();
+    _autoReloadTimer = Timer.periodic(Duration(seconds: 5), (_) => fetchData());
+  }
 
-    // Auto-reload every 5 seconds
-    _autoReloadTimer = Timer.periodic(Duration(seconds: 5), (timer) {
-      fetchData();
-    });
+  void _initAnimations() {
+    _animationController = AnimationController(
+      vsync: this,
+      duration: Duration(milliseconds: 500),
+    )..forward();
+
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: Curves.easeIn,
+      ),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.95, end: 1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: Curves.easeOutBack,
+      ),
+    );
   }
 
   @override
   void dispose() {
-    // Cancel the timer when this screen is disposed
+    _animationController.dispose();
     _autoReloadTimer?.cancel();
     super.dispose();
   }
 
   Future<void> fetchData() async {
     try {
-      setState(() {
-        isLoading = true; // Show loading spinner while fetching
-      });
+      setState(() => isLoading = true);
 
       Map<String, int> tempNumeric = {};
       Map<String, String> tempString = {};
 
-      // -------------------------------------------------
-      // Fetch numeric status from "parking_slots"
-      // -------------------------------------------------
-      // Single doc "status" with fields like "slot1": { "status": 1, "start_time": null }, etc.
-      DocumentSnapshot numericSnapshot =
-          await _firestore.collection('parking_slots').doc('status').get();
-
-      if (numericSnapshot.exists) {
-        Map data = numericSnapshot.data() as Map;
-
-        for (String slot in slotKeys) {
-          if (data.containsKey(slot)) {
-            // e.g. data["slot1"] = { "status": 1, "start_time": null }
-            var slotMap = data[slot];
-            if (slotMap is Map && slotMap.containsKey('status')) {
-              var value = slotMap['status'];
-              tempNumeric[slot] =
-                  (value is int) ? value : int.tryParse(value.toString()) ?? 0;
-              print('Numeric status for $slot: ${tempNumeric[slot]}');
-            } else {
-              print(
-                  'No "status" subfield found for $slot in parking_slots doc');
-            }
-          } else {
-            print('Field "$slot" not found in parking_slots → status document');
-          }
-        }
-      } else {
-        print('Document "status" not found in "parking_slots" collection.');
-      }
-
-      // -------------------------------------------------
-      // Fetch string status from "parkingSlots"
-      // -------------------------------------------------
-      // Each slot doc (e.g. "slot1") has a field "status": "0" or "1"
       for (String slot in slotKeys) {
-        DocumentSnapshot stringSnapshot =
-            await _firestore.collection('parkingSlots').doc(slot).get();
+        // Fetch numeric status
+        var numericSnapshot = await _firestore
+            .collection('advance_parking')
+            .doc(slot.toLowerCase())
+            .get();
+        if (numericSnapshot.exists) {
+          tempNumeric[slot] =
+              (numericSnapshot.data()?['status'] as num?)?.toInt() ?? 0;
+        }
+
+        // Fetch string status
+        var stringSnapshot = await _firestore
+            .collection('parkingSlots')
+            .doc(slot.toLowerCase())
+            .get();
         if (stringSnapshot.exists) {
-          var data = stringSnapshot.data() as Map;
-          if (data.containsKey('status')) {
-            tempString[slot] = data['status'].toString();
-            print('String status for $slot: ${tempString[slot]}');
-          } else {
-            print(
-                'No string "status" field found for doc "$slot" in parkingSlots.');
-          }
-        } else {
-          print('Document "$slot" not found in "parkingSlots" collection.');
+          tempString[slot] = stringSnapshot.data()?['status'].toString() ?? "0";
         }
       }
 
@@ -113,110 +91,142 @@ class _ParkingStatusState extends State<ParkingStatus> {
         numericStatus = tempNumeric;
         stringStatus = tempString;
         isLoading = false;
+        _animationController.reset();
+        _animationController.forward();
       });
     } catch (e) {
-      print('Error fetching Firestore data: $e');
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
+      print('Error: $e');
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    final isPortrait = screenSize.height > screenSize.width;
+
     return Scaffold(
-      // Wrap the page with HeaderFooter (which already includes a back arrow)
       body: HeaderFooter(
-        title: "Parking Slot Status",
+        title: "Slot Status",
         child: BackgroundImageWrapper(
           child: Padding(
-            padding: const EdgeInsets.all(8.0),
+            padding: EdgeInsets.all(screenSize.width * 0.03),
             child: isLoading
                 ? Center(child: CircularProgressIndicator())
-                : GridView.builder(
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2, // Two columns
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                    ),
-                    itemCount: slotKeys.length,
-                    itemBuilder: (context, index) {
-                      String slot = slotKeys[index];
-                      int numStatus = numericStatus[slot] ?? 0;
-                      String strStatus = stringStatus[slot] ?? "0";
-
-                      // Determine slot color:
-                      // - Red if string status is "1"
-                      // - Orange if numeric status is 1 and string status is "0"
-                      // - Green if both are 0
-                      // - Grey otherwise
-                      Color slotColor;
-                      if (strStatus == "1") {
-                        slotColor = Colors.red;
-                      } else if (numStatus == 1 && strStatus == "0") {
-                        slotColor = Colors.orange;
-                      } else if (numStatus == 0 && strStatus == "0") {
-                        slotColor = Colors.green;
-                      } else {
-                        slotColor = Colors.grey;
-                      }
-
-                      // Determine display message based on color
-                      String displayStatus;
-                      if (slotColor == Colors.green) {
-                        displayStatus = "Available";
-                      } else if (slotColor == Colors.orange) {
-                        displayStatus = "Occupied (Booked)";
-                      } else if (slotColor == Colors.red) {
-                        displayStatus = "Occupied";
-                      } else {
-                        displayStatus = "Unknown";
-                      }
-
-                      // Remove "slot" prefix if present
-                      String displaySlot = slot.toLowerCase().startsWith('slot')
-                          ? slot.substring(4)
-                          : slot;
-
-                      return Container(
-                        decoration: BoxDecoration(
-                          color: slotColor,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        padding: EdgeInsets.all(8),
-                        child: Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                "Slot $displaySlot",
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              SizedBox(height: 8),
-                              Text(
-                                displayStatus,
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 14,
-                                ),
-                              ),
-                              SizedBox(height: 8),
-                            ],
-                          ),
+                : AnimatedBuilder(
+                    animation: _animationController,
+                    builder: (context, child) {
+                      return Opacity(
+                        opacity: _fadeAnimation.value,
+                        child: Transform.scale(
+                          scale: _scaleAnimation.value,
+                          child: child,
                         ),
                       );
                     },
+                    child: GridView.builder(
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: isPortrait ? 2 : 4,
+                        crossAxisSpacing: screenSize.width * 0.03,
+                        mainAxisSpacing: screenSize.width * 0.03,
+                        childAspectRatio: 1.2,
+                      ),
+                      itemCount: slotKeys.length,
+                      itemBuilder: (context, index) {
+                        final slot = slotKeys[index];
+                        final numStatus = numericStatus[slot] ?? 0;
+                        final strStatus = stringStatus[slot] ?? "0";
+
+                        final Color slotColor = strStatus == "1"
+                            ? Colors.red
+                            : numStatus == 1 && strStatus == "0"
+                                ? Colors.orange
+                                : numStatus == 0 && strStatus == "0"
+                                    ? Colors.green
+                                    : Colors.grey;
+
+                        final String displayStatus = slotColor == Colors.green
+                            ? "AVAILABLE"
+                            : slotColor == Colors.orange
+                                ? "BOOKED"
+                                : slotColor == Colors.red
+                                    ? "OCCUPIED"
+                                    : "UNKNOWN";
+
+                        return _buildSlotCard(
+                          context,
+                          slot: slot.replaceAll('slot', '').toUpperCase(),
+                          status: displayStatus,
+                          color: slotColor,
+                          screenSize: screenSize,
+                        );
+                      },
+                    ),
                   ),
           ),
         ),
       ),
       floatingActionButton: FloatingActionButton(
         child: Icon(Icons.refresh),
-        onPressed: fetchData,
+        onPressed: () {
+          fetchData();
+          _animationController.reset();
+          _animationController.forward();
+        },
+        backgroundColor: Colors.white,
+      ),
+    );
+  }
+
+  Widget _buildSlotCard(
+    BuildContext context, {
+    required String slot,
+    required String status,
+    required Color color,
+    required Size screenSize,
+  }) {
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(screenSize.width * 0.04),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(screenSize.width * 0.04),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 6,
+              offset: Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                slot,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: screenSize.width * 0.06,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              SizedBox(height: screenSize.height * 0.01),
+              Text(
+                status,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: screenSize.width * 0.045,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

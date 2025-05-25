@@ -1,5 +1,5 @@
 name: parking
-description: "A new Flutter project."
+description: "A new Flutter project By AD3."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -39,11 +39,19 @@ dependencies:
   firebase_database: ^11.2.0 # For Realtime Database
   firebase_messaging: ^15.1.6 # For push notifications
   fluttertoast: ^8.2.1
-
+  qr_flutter: ^4.1.0
+  uuid: ^3.0.7
+  google_fonts: ^6.1.0
+  animate_do: ^3.0.2
+  fl_chart: ^0.63.0
+  intl: ^0.19.0
+  shared_preferences: ^2.2.2 
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  mobile_scanner: ^6.0.7
+  flutter_screenutil: ^5.9.3
 
 dev_dependencies:
   flutter_test: 
@@ -53,14 +61,13 @@ dev_dependencies:
 flutter_launcher_icons:
   android: "launcher_icon"
   ios: true
-  image_path: "assets/images/logo.png"
-
-  # The "flutter_lints" package below contains a set of recommended lints to
-  # encourage good coding practices. The lint set provided by the package is
-  # activated in the `analysis_options.yaml` file located at the root of your
-  # package. See that file for information about deactivating specific lint
-  # rules and activating additional ones.
-  flutter_lints: ^5.0.0
+  image_path: "assets/images/logo2.png"
+  adaptive_icon_background: "#FFFFFF" # White background
+  adaptive_icon_foreground: "assets/images/logo2.png" # Foreground layer
+  adaptive_icon_padding: true # Adds padding to ensure visibility in different shapes
+  min_sdk_android: 21 # For Android 5.0+
+  remove_alpha_ios: true # Removes transparency for iOS
+  background_color_ios: "#FFFFFF" # White background for iOS
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -79,6 +86,7 @@ flutter:
   #   - images/a_dot_ham.jpeg
   assets:
     - assets/images/logo.png
+    - assets/images/logo2.png
     - assets/images/background.jpg
     - assets/images/bottom_figure.png
     - assets/images/profile_icon.png
