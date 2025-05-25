@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/animation.dart';
 import 'package:parking/admin_report.dart';
 import 'parking_status.dart';
 import 'background_image_wrapper.dart';
@@ -172,7 +171,6 @@ class _AdminProfilePageState extends State<AdminProfilePage>
     final buttonHeight = screenHeight * 0.07;
     final buttonTextSize = screenWidth * 0.04;
     final titleTextSize = screenWidth * 0.06;
-    final spacingSmall = screenHeight * 0.02;
     final spacingMedium = screenHeight * 0.04;
     final spacingLarge = screenHeight * 0.06;
     final borderRadius = screenWidth * 0.05;
